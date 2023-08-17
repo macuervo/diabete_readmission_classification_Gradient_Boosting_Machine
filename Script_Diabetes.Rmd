@@ -1,0 +1,396 @@
+## **Diabetes Readmission Classification**
+
+```{r Load Packages and dataset , echo = FALSE, warning=FALSE, cache=FALSE, message=FALSE}
+      #install.packages("librarian")
+			#library(librarian)
+
+			librerias <- c('dplyr', 'readxl', 'stringr', 'formattable', 'lubridate', 
+				            'writexl', 'tidyr', 'splitstackshape', 'ranger', 'ggplot2',
+				            'broom', 'vtreat', 'magrittr', 'xgboost', 'kableExtra', 'VIM', 
+  				          'scales', 'e1071', 'ranger', 'ggplot2','broom','magrittr', 
+				            'caret', 'hrbrthemes','xgboost', 'viridis')
+
+      librarian::shelf(librerias)
+			
+      # If is necesary to load the file from local:
+			
+      #ruta <- 'yourdirectory'
+      #setwd(paste0(ruta,'Data'))
+      #dir()
+
+	    data_diabetes <- as_tibble(read.csv('diabetic_data.csv'))
+```
+
+## **Data Set Description**
+
+The dataset represents 10 years (1999-2008) of clinical care at 130 US hospitals and integrated delivery networks. It includes over 50 features representing patient and hospital outcomes. Information was extracted from the database for encounters that satisfied the following criteria.
+(1)	It is an inpatient encounter (a hospital admission).
+(2)	It is a diabetic encounter, that is, one during which any kind of diabetes was entered to the system as a diagnosis.
+(3)	The length of stay was at least 1 day and at most 14 days.
+(4)	Laboratory tests were performed during the encounter.
+(5)	Medications were administered during the encounter.
+The data contains such attributes as patient number, race, gender, age, admission type, time in hospital, medical specialty of admitting physician, number of lab test performed, HbA1c test result, diagnosis, number of medication, diabetic medications, number of outpatient, inpatient, and emergency visits in the year before the hospitalization, etc.
+
+For more information about the dataset please visit https://archive.ics.uci.edu/dataset/296/diabetes+130-us+hospitals+for+years+1999-2008
+
+```{r Dataset Structure, echo = FALSE}
+  
+                  kbl(str(data_diabetes)) %>%
+                          kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = T)
+```
+According to the information that accompanies the data set, we are aware of the existence of missing values for certain variables, which have been coded as "?"; therefore, in order to give them the appropriate treatment, we will recode them as NA.
+```{r identificacion missin values}
+                
+                diabetes_na <-  as_tibble(sapply(data_diabetes,                           # Replace values in all columns
+                                  function(x) replace(x, x %in% "?", NA)))
+
+
+                                  sapply(diabetes_na, function(x) sum(is.na(x)))
+		
+		            diabetes_na_percent <- colSums(is.na(diabetes_na))/nrow(diabetes_na)
+		            
+		            miss_percent <- as.data.frame(formattable::percent(round(diabetes_na_percent, 4)))
+                
+		            names(miss_percent) <- "Percentage"
+                
+                df_miss <-  miss_percent %>%
+                            arrange(desc(Percentage)) %>%
+                            filter(Percentage > 0) 
+                
+                df_miss   %>%  
+                kbl() %>%
+                kable_paper("hover", full_width = F)
+
+```
+##**Dataset Imputation K-nearest Neighbors**
+
+We can observe that the variables wight, medical_specialty, payer_code have too significant percentages to be imputed. The variables race, diag_3, diag_diag_2 and diag_1 have an insignificant percentage of missing values so we proceed with their imputation in case they are relevant for our model using a nearest neighbor imputation.
+```{r imputacion base}
+                                  
+                                  ## Exclude vars with a significant missing values percentage
+                                  diabetes_imput <-   diabetes_na %>%
+                                                      dplyr::select(-weight, -medical_specialty, -payer_code)
+                                                              
+                                  ## Imputing missing values
+                                  diabetes_imput <- kNN(diabetes_imput, k = 5)
+                                   
+                                  diabetes_imput <- diabetes_imput %>%
+                                                    dplyr::select(!(ends_with('imp')))
+                                    
+                                  sapply(diabetes_imput, function(x) sum(is.na(x)))
+		
+		                              diabetes_na_percent <- colSums(is.na(diabetes_imput))/nrow(diabetes_imput)
+		            
+		                              miss_percent <- as.data.frame(formattable::percent(round(diabetes_na_percent, 4)))
+                                  
+		                              names(miss_percent) <- "Percentage"
+		                              
+                                      df_miss <-  miss_percent %>%
+                                                  arrange(desc(Percentage))
+                                                  
+                                      
+                                                  df_miss  %>%  
+                                                  kbl() %>%
+                                                  kable_paper("hover", full_width = F)
+```
+We observed that the variables with significant percentages of missing values were excluded and the other variables with non-significant percentages of missing values were imputed.
+
+Additionally, we perform the integer format assignment for the numeric variables of our dataset
+
+```{r Format assign integer variables}
+
+                    diabetes_imput$time_in_hospital <- as.integer(diabetes_imput$time_in_hospital)
+                    diabetes_imput$num_lab_procedures <- as.integer(diabetes_imput$num_lab_procedures)
+                    diabetes_imput$num_procedures <- as.integer(diabetes_imput$num_procedures)
+                    diabetes_imput$num_medications <- as.integer(diabetes_imput$num_medications)
+                    diabetes_imput$number_outpatient <- as.integer(diabetes_imput$number_outpatient)
+                    diabetes_imput$number_emergency <- as.integer(diabetes_imput$number_emergency)
+                    diabetes_imput$number_inpatient <- as.integer(diabetes_imput$number_inpatient)
+                    diabetes_imput$number_diagnoses <- as.integer(diabetes_imput$number_diagnoses)
+            
+```
+##**Model Specification**
+
+For the development of our exercise we define as variables of interest those variables:
+
+- readmitted (depended variable)
+- age
+- gender
+- race
+- diabetesMed
+- time in hospital
+- num lab procedures
+- num medications
+- num outpatient
+- number emergency
+- number inpatient
+- number diagnosis
+
+According to the investigation of relevant issues with our case study and according to the literature consulted we have discarded the variabels corresponding to the application of different drugs to patients. This is due to the fact that the same information may be contained in variables such as the number of drugs applied, causing an overspecification of the model.
+
+Another reason for focusing on the aforementioned variables is the limitation of resources in terms of computational capacity. All the variables discarded are binomial categorical variables. When performing a One Hot Encoding the dimensions of the dataset exceed the available computational capacity.
+```{r}
+                              VAR_INTEREST <-   diabetes_imput %>%
+                                                dplyr::select(readmitted, age, gender, race, diabetesMed, 
+                                                              time_in_hospital, starts_with("num"))
+
+                              VAR_INTEREST <- as.vector(unlist(names(VAR_INTEREST)))
+                              
+                                                  VAR_INTEREST %>%
+                                                  kbl() %>%
+                                                  kable_paper("hover", full_width = F)
+```
+We then assign the factor format to the categorical variables selected for our model.
+```{r}
+
+                        DIABETES_SELECT <-  diabetes_imput %>%
+                                            dplyr::select(VAR_INTEREST) %>%
+                                            dplyr::mutate_if(is.character, as.factor)
+
+                                            
+```
+We conducted an exploration of the age variable due to its considerable number of categories:
+```{r Histogram gender by age, fig.width=12, fig.height=8}
+                            
+         hist_gender_age_graph <- DIABETES_SELECT %>%
+                                  dplyr::select(age, gender, readmitted) %>%
+                                  ggplot(aes(x=age,
+                                            y=age, 
+                                            fill = gender)) +
+                                  geom_bar(stat="identity",width=1) +
+                                  ggtitle("Histogram gender by age") +
+                                  theme_minimal() +                              
+                                  scale_fill_manual(values = c("#Dcc4EE", "#F9EA62", "#FCFBE7")) +
+                                  theme(
+                                      plot.title = element_text(color="#0D0923", 
+                                                                size=20,
+                                                                face="bold"),
+                                      axis.title.x = element_text(color="#0D0923", 
+                                                                  size=14 
+                                                                  ),
+                                      axis.title.y = element_text(color="#0D0923", 
+                                                                  size=14
+                                                                  ),
+                                      legend.position = "bottom",
+                                      legend.title = element_text(colour="#0D0923", 
+                                                                  size=14 
+                                                                  ),
+                                      legend.text = element_text(colour="#0D0923", 
+                                                                size=12 
+                                                                ),
+                                      panel.spacing = unit(0.1, "lines"),
+                                      strip.text.x = element_text(size = 12)
+                                      ) +
+                                  xlab("age") +
+                                  ylab("count")
+
+             hist_gender_age_graph 
+                           
+
+```
+It can be observed that the age variable is mainly concentrated in ages around 70 and 80 years old. This variable will be recoded to facilitate the development of the present exercise in three categories: ages under 60 years, 61 to 79 years and over 80 years
+```{r recoding age}
+
+
+                DIABETES_SELECT   <-    DIABETES_SELECT %>%
+                                        mutate(new_age = ifelse(age %in% c("[0-10)", "[10-20)", "[20-30)", 
+                                                                          "[30-40)", "[40-50)", "[50-60)"),
+                                                                          "[0-60)",
+                                                    ifelse(age %in% c("[60-70)", "[70-80)"),
+                                                           "[60-80)",
+                                                    ifelse(age %in% c("[80-90)", "[90-100)"),       
+                                                           "[90-100)", 999
+                                                          ))),
+                                         new_age = as.factor(new_age),
+                                         class_readmitted = as.factor(readmitted),
+                                         class_readmitted = recode(class_readmitted,
+                                                                  '<30' = 0,
+                                                                  '>30' = 1,
+                                                                  'NO' = 2 
+                                                                   )
+                                                          )
+```
+The new recategorization of the age variable is distributed as follows:
+```{r Hist nuw age}
+
+                     hist_gender_age_graph <- DIABETES_SELECT %>%
+                                                      dplyr::select(new_age, gender, readmitted) %>%
+                                                      ggplot(aes(x=new_age,
+                                                                y=new_age, 
+                                                                fill = gender)) +
+                                                      geom_bar(stat="identity",width=1) +
+                                                      ggtitle("Histogram gender by age") +
+                                                      theme_minimal() +                              
+                                                      scale_fill_manual(values = c("#Dcc4EE", "#F9EA62", "#FCFBE7")) +
+                                                      theme(
+                                                          plot.title = element_text(color="#0D0923", 
+                                                                                    size=20,
+                                                                                    face="bold"),
+                                                          axis.title.x = element_text(color="#0D0923", 
+                                                                                      size=14 
+                                                                                      ),
+                                                          axis.title.y = element_text(color="#0D0923", 
+                                                                                      size=14
+                                                                                      ),
+                                                          legend.position = "bottom",
+                                                          legend.title = element_text(colour="#0D0923", 
+                                                                                      size=14 
+                                                                                      ),
+                                                          legend.text = element_text(colour="#0D0923", 
+                                                                                    size=12 
+                                                                                    ),
+                                                          panel.spacing = unit(0.1, "lines"),
+                                                          strip.text.x = element_text(size = 12)
+                                                          ) +
+                                                      xlab("age") +
+                                                      ylab("count")
+                    
+                                 hist_gender_age_graph 
+                           
+```
+##**Gradient Boosting Machine**
+For the development of our exercise we will use a Gradient Boosting Machine which allows us to identify the optimal parameters that converge to the minimum value of the logloss function on a Random Forest model
+
+Definimos nuestro conjunto de datos de entrenamiento y testeo con una separación 80/20
+```{r Training and test set split, warning=FALSE, cache=FALSE, message=FALSE}
+                 # Set seed for reproducibility
+                 set.seed(423563)
+                 # Set the upper bound for the number of rows to be in the training set
+                 sample_size <- floor(0.8*nrow(DIABETES_SELECT))
+
+                 dataset_learn <- DIABETES_SELECT %>%
+                                  select(-readmitted, -age)
+                   
+                 
+                 # Assign rows to training/test sets randomly in 80/20 proportion
+                 train <- sample(seq_len(nrow(dataset_learn)), size = sample_size)
+                 
+                 # Separate training and test sets
+                 trainset <- dataset_learn[train, ]
+                 testset <- dataset_learn[-train, ]
+```
+##**One Hot Encoding**
+Since our model has categorical variables, we must give them an adequate treatment so that they are processed correctly by our model, for which we carry out a One Hot Encoding
+```{r, One Hot Encoding, warning=FALSE, cache=FALSE, message=FALSE}
+
+
+                      DIABETES_CHARS <- DIABETES_SELECT %>%
+                                        select_if(function(x) is.factor(x)) %>%
+                                        dplyr::select(-readmitted, -age)
+
+                      vars    <- as.vector(unlist(names(DIABETES_CHARS)))
+  
+
+                          # Crear el plan de tratamiento a partir de bikesJuly (los datos de entrenamiento)
+                          treatplan <- designTreatmentsZ(trainset, vars, verbose = FALSE)
+
+                          # Obtener las variables "clean" y "lev" del scoreFrame
+                          newvars <- treatplan %>%
+                                      use_series(scoreFrame) %>%               
+                                      filter(code %in% c("clean", "lev")) %>%  # obtener las variables de interes
+                                      use_series(varName)                     # obtener columna varName 
+
+                          
+                          newvars %>%
+                          kbl() %>%
+                          kable_paper("hover", full_width = F)  
+                          
+                          # Prepare the training data
+                          trainset.treat <- vtreat::prepare(treatplan, trainset,  varRestriction = newvars)
+
+                          # PPreparar la data de entrenamiento
+                          testset.treat <- vtreat::prepare(treatplan, testset, varRestriction = newvars)
+
+                          # Verificar la estrcutura de la data tratada
+                          #str(trainset.treat) 
+                          #str(trainset.treat)
+
+```
+After performing our One Hot Encoding we proceed to identify the number of trees where our model converges to the minimum of the logloss function.
+
+Since the output of our model has more than two categories, we defined a softmax function suitable for mutliclass classification models.
+```{r Optimum number of trees}
+
+                    # seed
+                    set.seed(423563)
+                    # nummber of classes
+                    num_class <- 3
+              
+                    # Ejecutar xgb.cv
+                    cv <- xgb.cv(data = as.matrix(trainset.treat), 
+                                label = trainset$class_readmitted,
+                                nrounds = 50,
+                                nfold = 5,
+                                objective = "multi:softmax",
+                                num_class = num_class,
+                                eta = 0.75,
+                                max_depth = 5,
+                                early_stopping_rounds = 5,
+                                verbose = FALSE   # en silencio
+                    )
+                    
+                    # Get log evaluetion parameter
+                      elog <- cv$evaluation_log
+                    
+                    # Determinaer cuantos arboles minimizan el RMSE
+                      elog %>% 
+                    # logloss minimum
+                      summarize(ntrees.train = which.min(train_mlogloss_mean),   
+                                ntrees.test  = which.min(test_mlogloss_mean)) %>% 
+                      kbl() %>%
+                      kable_paper("hover", full_width = F)
+                                                                                
+```
+
+```{r Model Gradient Boosting Machine}
+                 
+                    set.seed(423563)
+                    
+                    # Optimal number of trees
+                    ntrees <- 12
+                    
+                    levels(trainset$class_readmitted)
+                    
+                    # xgboost execution
+                    diabetes_model_xgb <-   xgboost(data = as.matrix(trainset.treat), # data de entrenamiento como matrix
+                                               label =  trainset$class_readmitted,  # columna de resultados
+                                               nrounds = ntrees,       # numero de arboles a cultivar
+                                               objective = "multi:softmax", # objetivo
+                                               num_class = num_class,
+                                               eta = 0.75,
+                                               max_depth = 5,
+                                               verbose = FALSE  # silent
+                                                )
+
+                      # Predictions
+                      testset$pred <- predict(diabetes_model_xgb, as.matrix(testset.treat))
+
+                      
+                
+
+```
+##**Root Mean Square Error** 
+We can see that our model presents a fit close to 89% compared to the estimates made to classify against their readmissions.
+```{r Root Mean Squere Error}
+                                      
+                                        testset %>%
+                                        mutate(residuals = class_readmitted - pred) %>%
+                                        summarize(rmse = sqrt(mean(residuals^2))) %>%
+                                        kbl() %>%
+                                        kable_paper("hover", full_width = F)
+```
+We also observed a stable behavior of the logloss function of our model
+```{r}
+e <- data.frame(diabetes_model_xgb$evaluation_log)
+plot(e$iter, e$train_mlogloss, col = 'blue')
+lines(e$iter, e$test_mlogloss, col = 'red')
+```
+```{r}
+
+                      imp_fearture <- xgb.importance(colnames(trainset.treat), 
+                                                      model = diabetes_model_xgb)
+                        
+                        xgb.plot.importance(imp_fearture)
+```
+
+
